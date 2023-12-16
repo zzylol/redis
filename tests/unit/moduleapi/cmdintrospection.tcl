@@ -40,8 +40,4 @@ start_server {tags {"modules"}} {
 
         assert_equal $redis_reply $module_reply
     }
-
-    test "Unload the module - cmdintrospection" {
-        assert_equal {OK} [r module unload cmdintrospection]
-    }
 }

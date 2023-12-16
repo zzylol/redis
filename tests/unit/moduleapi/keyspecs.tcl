@@ -13,22 +13,8 @@ start_server {tags {"modules"}} {
         # Verify key-spec auto-generated from the legacy triple
         set keyspecs [lindex $reply 8]
         assert_equal [llength $keyspecs] 1
-        assert_equal [lindex $keyspecs 0] {flags {RW access update} begin_search {type index spec {index 1}} find_keys {type range spec {lastkey -1 keystep 2 limit 0}}}
-        assert_equal [r command getkeys kspec.none key1 val1 key2 val2] {key1 key2}
-    }
-
-    test "Module key specs: No spec, only legacy triple with getkeys-api" {
-        set reply [lindex [r command info kspec.nonewithgetkeys] 0]
-        # Verify (first, last, step) and movablekeys
-        assert_equal [lindex $reply 2] {module movablekeys}
-        assert_equal [lindex $reply 3] 1
-        assert_equal [lindex $reply 4] -1
-        assert_equal [lindex $reply 5] 2
-        # Verify key-spec auto-generated from the legacy triple
-        set keyspecs [lindex $reply 8]
-        assert_equal [llength $keyspecs] 1
         assert_equal [lindex $keyspecs 0] {flags {RW access update variable_flags} begin_search {type index spec {index 1}} find_keys {type range spec {lastkey -1 keystep 2 limit 0}}}
-        assert_equal [r command getkeys kspec.nonewithgetkeys key1 val1 key2 val2] {key1 key2}
+        assert_equal [r command getkeys kspec.none key1 val1 key2 val2] {key1 key2}
     }
 
     test "Module key specs: Two ranges" {
@@ -113,11 +99,7 @@ start_server {tags {"modules"}} {
 
     test {COMMAND GETKEYSANDFLAGS correctly reports module key-spec without flags} {
         r command getkeysandflags kspec.none key1 val1 key2 val2
-    } {{key1 {RW access update}} {key2 {RW access update}}}
-
-    test {COMMAND GETKEYSANDFLAGS correctly reports module key-spec with flags} {
-        r command getkeysandflags kspec.nonewithgetkeys key1 val1 key2 val2
-    } {{key1 {RO access}} {key2 {RO access}}}
+    } {{key1 {RW access update variable_flags}} {key2 {RW access update variable_flags}}}
 
     test {COMMAND GETKEYSANDFLAGS correctly reports module key-spec flags} {
         r command getkeysandflags kspec.keyword keys key1 key2 key3

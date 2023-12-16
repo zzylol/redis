@@ -71,7 +71,7 @@
                 "since": "6.2.0"
             },
             {
-                "name": "data",
+                "name": "longitude_latitude_member",
                 "type": "block",
                 "multiple": true,
                 "arguments": [

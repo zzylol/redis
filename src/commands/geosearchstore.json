@@ -6,12 +6,6 @@
         "since": "6.2.0",
         "arity": -8,
         "function": "geosearchstoreCommand",
-        "history": [
-            [
-                "7.0.0",
-                "Added support for uppercase unit names."
-            ]
-        ],
         "command_flags": [
             "WRITE",
             "DENYOOM"
@@ -79,7 +73,7 @@
                     },
                     {
                         "token": "FROMLONLAT",
-                        "name": "fromlonlat",
+                        "name": "longitude_latitude",
                         "type": "block",
                         "arguments": [
                             {
@@ -196,7 +190,7 @@
                 ]
             },
             {
-                "name": "count-block",
+                "name": "count",
                 "type": "block",
                 "optional": true,
                 "arguments": [

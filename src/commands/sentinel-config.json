@@ -14,13 +14,14 @@
         ],
         "arguments": [
             {
-                "name":"action",
+                "name":"set_or_get",
                 "type":"oneof",
                 "arguments":[
                     {
-                        "name":"set",
+                        "name":"set_param_value",
                         "token":"SET",
                         "type":"block",
+                        "multiple":true,
                         "arguments":[
                             {
                                 "name":"parameter",
@@ -34,6 +35,7 @@
                     },
                     {
                         "token":"GET",
+                        "multiple":true,
                         "name":"parameter",
                         "type":"string"
                     }

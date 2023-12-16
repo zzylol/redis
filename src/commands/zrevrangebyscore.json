@@ -65,7 +65,7 @@
             },
             {
                 "token": "LIMIT",
-                "name": "limit",
+                "name": "offset_count",
                 "type": "block",
                 "optional": true,
                 "arguments": [

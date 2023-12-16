@@ -88,12 +88,6 @@
                 "token": "JUSTID",
                 "type": "pure-token",
                 "optional": true
-            },
-            {
-                "name": "lastid",
-                "token": "LASTID",
-                "type": "string",
-                "optional": true
             }
         ]
     }

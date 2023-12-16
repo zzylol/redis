@@ -388,7 +388,7 @@ void trackingInvalidateKey(client *c, robj *keyobj, int bcast) {
         /* If the client enabled the NOLOOP mode, don't send notifications
          * about keys changed by the client itself. */
         if (target->flags & CLIENT_TRACKING_NOLOOP &&
-            target == server.current_client)
+            target == c)
         {
             continue;
         }
@@ -412,7 +412,7 @@ void trackingInvalidateKey(client *c, robj *keyobj, int bcast) {
     raxRemove(TrackingTable,(unsigned char*)key,keylen,NULL);
 }
 
-void trackingHandlePendingKeyInvalidations(void) {
+void trackingHandlePendingKeyInvalidations() {
     if (!listLength(server.tracking_pending_keys)) return;
 
     listNode *ln;
@@ -423,15 +423,9 @@ void trackingHandlePendingKeyInvalidations(void) {
         robj *key = listNodeValue(ln);
         /* current_client maybe freed, so we need to send invalidation
          * message only when current_client is still alive */
-        if (server.current_client != NULL) {
-            if (key != NULL) {
-                sendTrackingMessage(server.current_client,(char *)key->ptr,sdslen(key->ptr),0);
-            } else {
-                sendTrackingMessage(server.current_client,shared.null[server.current_client->resp]->ptr,
-                    sdslen(shared.null[server.current_client->resp]->ptr),1);
-            }
-        }
-        if (key != NULL) decrRefCount(key);
+        if (server.current_client != NULL)
+            sendTrackingMessage(server.current_client,(char *)key->ptr,sdslen(key->ptr),0);
+        decrRefCount(key);
     }
     listEmpty(server.tracking_pending_keys);
 }
@@ -460,12 +454,7 @@ void trackingInvalidateKeysOnFlush(int async) {
         while ((ln = listNext(&li)) != NULL) {
             client *c = listNodeValue(ln);
             if (c->flags & CLIENT_TRACKING) {
-                if (c == server.current_client) {
-                    /* We use a special NULL to indicate that we should send null */
-                    listAddNodeTail(server.tracking_pending_keys,NULL);
-                } else {
-                    sendTrackingMessage(c,shared.null[c->resp]->ptr,sdslen(shared.null[c->resp]->ptr),1);
-                }
+                sendTrackingMessage(c,shared.null[c->resp]->ptr,sdslen(shared.null[c->resp]->ptr),1);
             }
         }
     }

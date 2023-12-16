@@ -173,7 +173,6 @@ void* luaGetFromRegistry(lua_State* lua, const char* name) {
     lua_gettable(lua, LUA_REGISTRYINDEX);
 
     if (lua_isnil(lua, -1)) {
-        lua_pop(lua, 1); /* pops the value */
         return NULL;
     }
     /* must be light user data */
@@ -335,7 +334,7 @@ static void redisProtocolToLuaType_Error(void *ctx, const char *str, size_t len,
     /* push a field indicate to ignore updating the stats on this error
      * because it was already updated when executing the command. */
     lua_pushstring(lua,"ignore_error_stats_update");
-    lua_pushboolean(lua, 1);
+    lua_pushboolean(lua, true);
     lua_settable(lua,-3);
 }
 
@@ -629,7 +628,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
         /* Handle error reply. */
         /* we took care of the stack size on function start */
         lua_pushstring(lua,"err");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TSTRING) {
             lua_pop(lua, 1); /* pop the error message, we will use luaExtractErrorInformation to get error information */
@@ -647,7 +646,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle status reply. */
         lua_pushstring(lua,"ok");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TSTRING) {
             sds ok = sdsnew(lua_tostring(lua,-1));
@@ -661,7 +660,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle double reply. */
         lua_pushstring(lua,"double");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TNUMBER) {
             addReplyDouble(c,lua_tonumber(lua,-1));
@@ -672,7 +671,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle big number reply. */
         lua_pushstring(lua,"big_number");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TSTRING) {
             sds big_num = sdsnewlen(lua_tostring(lua,-1), lua_strlen(lua,-1));
@@ -686,16 +685,16 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle verbatim reply. */
         lua_pushstring(lua,"verbatim_string");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TTABLE) {
             lua_pushstring(lua,"format");
-            lua_rawget(lua,-2);
+            lua_gettable(lua,-2);
             t = lua_type(lua,-1);
             if (t == LUA_TSTRING){
                 char* format = (char*)lua_tostring(lua,-1);
                 lua_pushstring(lua,"string");
-                lua_rawget(lua,-3);
+                lua_gettable(lua,-3);
                 t = lua_type(lua,-1);
                 if (t == LUA_TSTRING){
                     size_t len;
@@ -712,7 +711,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle map reply. */
         lua_pushstring(lua,"map");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TTABLE) {
             int maplen = 0;
@@ -735,7 +734,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
 
         /* Handle set reply. */
         lua_pushstring(lua,"set");
-        lua_rawget(lua,-2);
+        lua_gettable(lua,-2);
         t = lua_type(lua,-1);
         if (t == LUA_TTABLE) {
             int setlen = 0;
@@ -762,7 +761,7 @@ static void luaReplyToRedisReply(client *c, client* script_client, lua_State *lu
         while(1) {
             /* we took care of the stack size on function start */
             lua_pushnumber(lua,j++);
-            lua_rawget(lua,-2);
+            lua_gettable(lua,-2);
             t = lua_type(lua,-1);
             if (t == LUA_TNIL) {
                 lua_pop(lua,1);
@@ -839,7 +838,10 @@ static robj **luaArgsToRedisArgv(lua_State *lua, int *argc) {
 static int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     int j;
     scriptRunCtx* rctx = luaGetFromRegistry(lua, REGISTRY_RUN_CTX_NAME);
-    serverAssert(rctx); /* Only supported inside script invocation */
+    if (!rctx) {
+        luaPushError(lua, "redis.call/pcall can only be called inside a script invocation");
+        return luaError(lua);
+    }
     sds err = NULL;
     client* c = rctx->c;
     sds reply;
@@ -889,7 +891,7 @@ static int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         /* push a field indicate to ignore updating the stats on this error
          * because it was already updated when executing the command. */
         lua_pushstring(lua,"ignore_error_stats_update");
-        lua_pushboolean(lua, 1);
+        lua_pushboolean(lua, true);
         lua_settable(lua,-3);
         goto cleanup;
     }
@@ -1050,7 +1052,10 @@ static int luaRedisSetReplCommand(lua_State *lua) {
     int flags, argc = lua_gettop(lua);
 
     scriptRunCtx* rctx = luaGetFromRegistry(lua, REGISTRY_RUN_CTX_NAME);
-    serverAssert(rctx); /* Only supported inside script invocation */
+    if (!rctx) {
+        luaPushError(lua, "redis.set_repl can only be called inside a script invocation");
+        return luaError(lua);
+    }
 
     if (argc != 1) {
         luaPushError(lua, "redis.set_repl() requires two arguments.");
@@ -1072,7 +1077,10 @@ static int luaRedisSetReplCommand(lua_State *lua) {
  * Checks ACL permissions for given command for the current user. */
 static int luaRedisAclCheckCmdPermissionsCommand(lua_State *lua) {
     scriptRunCtx* rctx = luaGetFromRegistry(lua, REGISTRY_RUN_CTX_NAME);
-    serverAssert(rctx); /* Only supported inside script invocation */
+    if (!rctx) {
+        luaPushError(lua, "redis.acl_check_cmd can only be called inside a script invocation");
+        return luaError(lua);
+    }
     int raise_error = 0;
 
     int argc;
@@ -1144,7 +1152,10 @@ static int luaLogCommand(lua_State *lua) {
 /* redis.setresp() */
 static int luaSetResp(lua_State *lua) {
     scriptRunCtx* rctx = luaGetFromRegistry(lua, REGISTRY_RUN_CTX_NAME);
-    serverAssert(rctx); /* Only supported inside script invocation */
+    if (!rctx) {
+        luaPushError(lua, "redis.setresp can only be called inside a script invocation");
+        return luaError(lua);
+    }
     int argc = lua_gettop(lua);
 
     if (argc != 1) {
@@ -1470,6 +1481,11 @@ static void luaCreateArray(lua_State *lua, robj **elev, int elec) {
 /* The following implementation is the one shipped with Lua itself but with
  * rand() replaced by redisLrand48(). */
 static int redis_math_random (lua_State *L) {
+  scriptRunCtx* rctx = luaGetFromRegistry(L, REGISTRY_RUN_CTX_NAME);
+  if (!rctx) {
+    return luaL_error(L, "math.random can only be called inside a script invocation");
+  }
+
   /* the `%' avoids the (rare) case of r==1, and is needed also because on
      some systems (SunOS!) `rand()' may return a value larger than RAND_MAX */
   lua_Number r = (lua_Number)(redisLrand48()%REDIS_LRAND48_MAX) /
@@ -1498,6 +1514,10 @@ static int redis_math_random (lua_State *L) {
 }
 
 static int redis_math_randomseed (lua_State *L) {
+  scriptRunCtx* rctx = luaGetFromRegistry(L, REGISTRY_RUN_CTX_NAME);
+  if (!rctx) {
+    return luaL_error(L, "math.randomseed can only be called inside a script invocation");
+  }
   redisSrand48(luaL_checkint(L, 1));
   return 0;
 }
@@ -1506,7 +1526,6 @@ static int redis_math_randomseed (lua_State *L) {
 static void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
     UNUSED(ar);
     scriptRunCtx* rctx = luaGetFromRegistry(lua, REGISTRY_RUN_CTX_NAME);
-    serverAssert(rctx); /* Only supported inside script invocation */
     if (scriptInterrupt(rctx) == SCRIPT_KILL) {
         serverLog(LL_WARNING,"Lua script killed by user with SCRIPT KILL.");
 
@@ -1534,7 +1553,6 @@ void luaExtractErrorInformation(lua_State *lua, errorInfo *err_info) {
         err_info->line = NULL;
         err_info->source = NULL;
         err_info->ignore_err_stats_update = 0;
-        return;
     }
 
     lua_getfield(lua, -1, "err");

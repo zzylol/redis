@@ -36,7 +36,7 @@
                     },
                     {
                         "token": "AUTH",
-                        "name": "auth",
+                        "name": "username_password",
                         "type": "block",
                         "optional": true,
                         "arguments": [

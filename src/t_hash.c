@@ -227,27 +227,31 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
         if (hashTypeLength(o) > server.hash_max_listpack_entries)
             hashTypeConvert(o, OBJ_ENCODING_HT);
     } else if (o->encoding == OBJ_ENCODING_HT) {
-        dict *ht = o->ptr;
-        dictEntry *de, *existing;
-        sds v;
-        if (flags & HASH_SET_TAKE_VALUE) {
-            v = value;
-            value = NULL;
-        } else {
-            v = sdsdup(value);
-        }
-        de = dictAddRaw(ht, field, &existing);
+        dictEntry *de = dictFind(o->ptr,field);
         if (de) {
-            dictSetVal(ht, de, v);
+            sdsfree(dictGetVal(de));
+            if (flags & HASH_SET_TAKE_VALUE) {
+                dictGetVal(de) = value;
+                value = NULL;
+            } else {
+                dictGetVal(de) = sdsdup(value);
+            }
+            update = 1;
+        } else {
+            sds f,v;
             if (flags & HASH_SET_TAKE_FIELD) {
+                f = field;
                 field = NULL;
             } else {
-                dictSetKey(ht, de, sdsdup(field));
+                f = sdsdup(field);
             }
-        } else {
-            sdsfree(dictGetVal(existing));
-            dictSetVal(ht, existing, v);
-            update = 1;
+            if (flags & HASH_SET_TAKE_VALUE) {
+                v = value;
+                value = NULL;
+            } else {
+                v = sdsdup(value);
+            }
+            dictAdd(o->ptr,f,v);
         }
     } else {
         serverPanic("Unknown hash encoding");
@@ -666,10 +670,6 @@ void hincrbyfloatCommand(client *c) {
     unsigned int vlen;
 
     if (getLongDoubleFromObjectOrReply(c,c->argv[3],&incr,NULL) != C_OK) return;
-    if (isnan(incr) || isinf(incr)) {
-        addReplyError(c,"value is NaN or Infinity");
-        return;
-    }
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     if (hashTypeGetValue(o,c->argv[2]->ptr,&vstr,&vlen,&ll) == C_OK) {
         if (vstr) {

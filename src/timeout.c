@@ -164,19 +164,12 @@ void handleBlockedClientsTimeout(void) {
 int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit) {
     long long tval;
     long double ftval;
-    mstime_t now = commandTimeSnapshot();
 
     if (unit == UNIT_SECONDS) {
         if (getLongDoubleFromObjectOrReply(c,object,&ftval,
             "timeout is not a float or out of range") != C_OK)
             return C_ERR;
-
-        ftval *= 1000.0;  /* seconds => millisec */
-        if (ftval > LLONG_MAX) {
-            addReplyError(c, "timeout is out of range");
-            return C_ERR;
-        }
-        tval = (long long) ftval;
+        tval = (long long) (ftval * 1000.0);
     } else {
         if (getLongLongFromObjectOrReply(c,object,&tval,
             "timeout is not an integer or out of range") != C_OK)
@@ -189,11 +182,7 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
     }
 
     if (tval > 0) {
-        if  (tval > LLONG_MAX - now) {
-            addReplyError(c,"timeout is out of range"); /* 'tval+now' would overflow */
-            return C_ERR;
-        }
-        tval += now;
+        tval += mstime();
     }
     *timeout = tval;
 

@@ -46,27 +46,26 @@
                 "key_spec_index": 0
             },
             {
-                "name": "group",
+                "name": "groupname",
                 "type": "string"
             },
             {
-                "name": "id-selector",
+                "name": "id",
                 "type": "oneof",
                 "arguments": [
                     {
-                        "name": "id",
+                        "name": "ID",
                         "type": "string"
                     },
                     {
-                        "name": "new-id",
+                        "name": "new_id",
                         "type": "pure-token",
                         "token": "$"
                     }
                 ]
             },
             {
-                "name": "entriesread",
-                "display": "entries-read",
+                "name": "entries_read",
                 "token": "ENTRIESREAD",
                 "type": "integer",
                 "optional": true

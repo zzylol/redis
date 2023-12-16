@@ -1028,7 +1028,7 @@ unsigned char *zzlDelete(unsigned char *zl, unsigned char *eptr) {
 unsigned char *zzlInsertAt(unsigned char *zl, unsigned char *eptr, sds ele, double score) {
     unsigned char *sptr;
     char scorebuf[MAX_D2STRING_CHARS];
-    int scorelen = 0;
+    int scorelen;
     long long lscore;
     int score_is_long = double2ll(score, &lscore);
     if (!score_is_long)
@@ -2952,10 +2952,8 @@ static void zrangeResultFinalizeClient(zrange_result_handler *handler,
 /* Result handler methods for storing the ZRANGESTORE to a zset. */
 static void zrangeResultBeginStore(zrange_result_handler *handler, long length)
 {
-    if (length > (long)server.zset_max_listpack_entries)
-        handler->dstobj = createZsetObject();
-    else
-        handler->dstobj = createZsetListpackObject();
+    UNUSED(length);
+    handler->dstobj = createZsetListpackObject();
 }
 
 static void zrangeResultEmitCBufferForStore(zrange_result_handler *handler,

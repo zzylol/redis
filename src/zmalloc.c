@@ -59,12 +59,14 @@ void zlibc_free(void *ptr) {
 
 #ifdef HAVE_MALLOC_SIZE
 #define PREFIX_SIZE (0)
+#define ASSERT_NO_SIZE_OVERFLOW(sz)
 #else
 #if defined(__sun) || defined(__sparc) || defined(__sparc__)
 #define PREFIX_SIZE (sizeof(long long))
 #else
 #define PREFIX_SIZE (sizeof(size_t))
 #endif
+#define ASSERT_NO_SIZE_OVERFLOW(sz) assert((sz) + PREFIX_SIZE > (sz))
 #endif
 
 /* When using the libc allocator, use a minimum allocation size to match the
@@ -104,8 +106,7 @@ static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 /* Try allocating memory, and return NULL if failed.
  * '*usable' is set to the usable size if non NULL. */
 void *ztrymalloc_usable(size_t size, size_t *usable) {
-    /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
-    if (size >= SIZE_MAX/2) return NULL;
+    ASSERT_NO_SIZE_OVERFLOW(size);
     void *ptr = malloc(MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
 
     if (!ptr) return NULL;
@@ -148,7 +149,7 @@ void *zmalloc_usable(size_t size, size_t *usable) {
  * Currently implemented only for jemalloc. Used for online defragmentation. */
 #ifdef HAVE_DEFRAG
 void *zmalloc_no_tcache(size_t size) {
-    if (size >= SIZE_MAX/2) zmalloc_oom_handler(size);
+    ASSERT_NO_SIZE_OVERFLOW(size);
     void *ptr = mallocx(size+PREFIX_SIZE, MALLOCX_TCACHE_NONE);
     if (!ptr) zmalloc_oom_handler(size);
     update_zmalloc_stat_alloc(zmalloc_size(ptr));
@@ -165,8 +166,7 @@ void zfree_no_tcache(void *ptr) {
 /* Try allocating memory and zero it, and return NULL if failed.
  * '*usable' is set to the usable size if non NULL. */
 void *ztrycalloc_usable(size_t size, size_t *usable) {
-    /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
-    if (size >= SIZE_MAX/2) return NULL;
+    ASSERT_NO_SIZE_OVERFLOW(size);
     void *ptr = calloc(1, MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
     if (ptr == NULL) return NULL;
 
@@ -221,6 +221,7 @@ void *zcalloc_usable(size_t size, size_t *usable) {
 /* Try reallocating memory, and return NULL if failed.
  * '*usable' is set to the usable size if non NULL. */
 void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
+    ASSERT_NO_SIZE_OVERFLOW(size);
 #ifndef HAVE_MALLOC_SIZE
     void *realptr;
 #endif
@@ -236,13 +237,6 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable) {
     /* Not freeing anything, just redirect to malloc. */
     if (ptr == NULL)
         return ztrymalloc_usable(size, usable);
-
-    /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
-    if (size >= SIZE_MAX/2) {
-        zfree(ptr);
-        if (usable) *usable = 0;
-        return NULL;
-    }
 
 #ifdef HAVE_MALLOC_SIZE
     oldsize = zmalloc_size(ptr);
@@ -609,7 +603,7 @@ int jemalloc_purge() {
     unsigned narenas = 0;
     size_t sz = sizeof(unsigned);
     if (!je_mallctl("arenas.narenas", &narenas, &sz, NULL, 0)) {
-        snprintf(tmp, sizeof(tmp), "arena.%d.purge", narenas);
+        sprintf(tmp, "arena.%d.purge", narenas);
         if (!je_mallctl(tmp, NULL, 0, NULL, 0))
             return 0;
     }

@@ -30,13 +30,11 @@
 
 #include "server.h"
 #include "cluster.h"
-#include "connection.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <glob.h>
 #include <string.h>
-#include <locale.h>
 
 /*-----------------------------------------------------------------------------
  * Config file name-value maps.
@@ -1418,9 +1416,9 @@ void rewriteConfigUserOption(struct rewriteConfigState *state) {
         sds line = sdsnew("user ");
         line = sdscatsds(line,u->name);
         line = sdscatlen(line," ",1);
-        robj *descr = ACLDescribeUser(u);
-        line = sdscatsds(line,descr->ptr);
-        decrRefCount(descr);
+        sds descr = ACLDescribeUser(u);
+        line = sdscatsds(line,descr);
+        sdsfree(descr);
         rewriteConfigRewriteLine(state,"user",line,1);
     }
     raxStop(&ri);
@@ -1667,7 +1665,6 @@ int rewriteConfigOverwriteFile(char *configfile, sds content) {
     const char *tmp_suffix = ".XXXXXX";
     size_t offset = 0;
     ssize_t written_bytes = 0;
-    int old_errno;
 
     int tmp_path_len = snprintf(tmp_conffile, sizeof(tmp_conffile), "%s%s", configfile, tmp_suffix);
     if (tmp_path_len <= 0 || (unsigned int)tmp_path_len >= sizeof(tmp_conffile)) {
@@ -1704,18 +1701,14 @@ int rewriteConfigOverwriteFile(char *configfile, sds content) {
         serverLog(LL_WARNING, "Could not chmod config file (%s)", strerror(errno));
     else if (rename(tmp_conffile, configfile) == -1)
         serverLog(LL_WARNING, "Could not rename tmp config file (%s)", strerror(errno));
-    else if (fsyncFileDir(configfile) == -1)
-        serverLog(LL_WARNING, "Could not sync config file dir (%s)", strerror(errno));
     else {
         retval = 0;
         serverLog(LL_DEBUG, "Rewritten config file (%s) successfully", configfile);
     }
 
 cleanup:
-    old_errno = errno;
     close(fd);
     if (retval) unlink(tmp_conffile);
-    errno = old_errno;
     return retval;
 }
 
@@ -1973,7 +1966,8 @@ static int enumConfigSet(standardConfig *config, sds *argv, int argc, const char
         }
         sdsrange(enumerr,0,-3); /* Remove final ", ". */
 
-        redis_strlcpy(loadbuf, enumerr, LOADBUF_SIZE);
+        strncpy(loadbuf, enumerr, LOADBUF_SIZE);
+        loadbuf[LOADBUF_SIZE - 1] = '\0';
 
         sdsfree(enumerr);
         *err = loadbuf;
@@ -2402,15 +2396,6 @@ static int isValidProcTitleTemplate(char *val, const char **err) {
     return 1;
 }
 
-static int updateLocaleCollate(const char **err) {
-    const char *s = setlocale(LC_COLLATE, server.locale_collate);
-    if (s == NULL) {
-        *err = "Invalid locale name";
-        return 0;
-    }
-    return 1;
-}
-
 static int updateProcTitleTemplate(const char **err) {
     if (redisSetProcTitle(NULL) == C_ERR) {
         *err = "failed to set process title";
@@ -2430,14 +2415,7 @@ static int updateHZ(const char **err) {
 }
 
 static int updatePort(const char **err) {
-    connListener *listener = listenerByType(CONN_TYPE_SOCKET);
-
-    serverAssert(listener != NULL);
-    listener->bindaddr = server.bindaddr;
-    listener->bindaddr_count = server.bindaddr_count;
-    listener->port = server.port;
-    listener->ct = connectionByType(CONN_TYPE_SOCKET);
-    if (changeListener(listener) == C_ERR) {
+    if (changeListenPort(server.port, &server.ipfd, acceptTcpHandler) == C_ERR) {
         *err = "Unable to listen on this port. Check server logs.";
         return 0;
     }
@@ -2516,7 +2494,7 @@ static int updateMaxclients(const char **err) {
     adjustOpenFilesLimit();
     if (server.maxclients != new_maxclients) {
         static char msg[128];
-        snprintf(msg, sizeof(msg), "The operating system is not able to handle the specified number of clients, try with %d", server.maxclients);
+        sprintf(msg, "The operating system is not able to handle the specified number of clients, try with %d", server.maxclients);
         *err = msg;
         return 0;
     }
@@ -2552,34 +2530,10 @@ int updateRequirePass(const char **err) {
     return 1;
 }
 
-/* applyBind affects both TCP and TLS (if enabled) together */
 static int applyBind(const char **err) {
-    connListener *tcp_listener = listenerByType(CONN_TYPE_SOCKET);
-    connListener *tls_listener = listenerByType(CONN_TYPE_TLS);
-
-    serverAssert(tcp_listener != NULL);
-    tcp_listener->bindaddr = server.bindaddr;
-    tcp_listener->bindaddr_count = server.bindaddr_count;
-    tcp_listener->port = server.port;
-    tcp_listener->ct = connectionByType(CONN_TYPE_SOCKET);
-    if (changeListener(tcp_listener) == C_ERR) {
+    if (changeBindAddr() == C_ERR) {
         *err = "Failed to bind to specified addresses.";
-        if (tls_listener)
-            closeListener(tls_listener); /* failed with TLS together */
         return 0;
-    }
-
-    if (server.tls_port != 0) {
-        serverAssert(tls_listener != NULL);
-        tls_listener->bindaddr = server.bindaddr;
-        tls_listener->bindaddr_count = server.bindaddr_count;
-        tls_listener->port = server.tls_port;
-        tls_listener->ct = connectionByType(CONN_TYPE_TLS);
-        if (changeListener(tls_listener) == C_ERR) {
-            *err = "Failed to bind to specified addresses.";
-            closeListener(tcp_listener); /* failed with TCP together */
-            return 0;
-        }
     }
 
     return 1;
@@ -2603,12 +2557,13 @@ int updateClusterHostname(const char **err) {
     return 1;
 }
 
+#ifdef USE_OPENSSL
 static int applyTlsCfg(const char **err) {
     UNUSED(err);
 
     /* If TLS is enabled, try to configure OpenSSL. */
     if ((server.tls_port || server.tls_replication || server.tls_cluster)
-         && connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 1) == C_ERR) {
+            && tlsConfigure(&server.tls_ctx_config) == C_ERR) {
         *err = "Unable to update TLS configuration. Check server logs.";
         return 0;
     }
@@ -2617,24 +2572,20 @@ static int applyTlsCfg(const char **err) {
 
 static int applyTLSPort(const char **err) {
     /* Configure TLS in case it wasn't enabled */
-    if (connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 0) == C_ERR) {
+    if (!isTlsConfigured() && tlsConfigure(&server.tls_ctx_config) == C_ERR) {
         *err = "Unable to update TLS configuration. Check server logs.";
         return 0;
     }
 
-    connListener *listener = listenerByType(CONN_TYPE_TLS);
-    serverAssert(listener != NULL);
-    listener->bindaddr = server.bindaddr;
-    listener->bindaddr_count = server.bindaddr_count;
-    listener->port = server.tls_port;
-    listener->ct = connectionByType(CONN_TYPE_TLS);
-    if (changeListener(listener) == C_ERR) {
+    if (changeListenPort(server.tls_port, &server.tlsfd, acceptTLSHandler) == C_ERR) {
         *err = "Unable to listen on this port. Check server logs.";
         return 0;
     }
 
     return 1;
 }
+
+#endif  /* USE_OPENSSL */
 
 static int setConfigDirOption(standardConfig *config, sds *argv, int argc, const char **err) {
     UNUSED(config);
@@ -2940,7 +2891,7 @@ static sds getConfigLatencyTrackingInfoPercentilesOutputOption(standardConfig *c
     sds buf = sdsempty();
     for (int j = 0; j < server.latency_tracking_info_percentiles_len; j++) {
         char fbuf[128];
-        size_t len = snprintf(fbuf, sizeof(fbuf), "%f", server.latency_tracking_info_percentiles[j]);
+        size_t len = sprintf(fbuf, "%f", server.latency_tracking_info_percentiles[j]);
         len = trimDoubleString(fbuf, len);
         buf = sdscatlen(buf, fbuf, len);
         if (j != server.latency_tracking_info_percentiles_len-1)
@@ -2962,7 +2913,7 @@ void rewriteConfigLatencyTrackingInfoPercentilesOutputOption(standardConfig *con
     } else {
         for (int j = 0; j < server.latency_tracking_info_percentiles_len; j++) {
             char fbuf[128];
-            size_t len = snprintf(fbuf, sizeof(fbuf), " %f", server.latency_tracking_info_percentiles[j]);
+            size_t len = sprintf(fbuf, " %f", server.latency_tracking_info_percentiles[j]);
             len = trimDoubleString(fbuf, len);
             line = sdscatlen(line, fbuf, len);
         }
@@ -3040,7 +2991,6 @@ standardConfig static_configs[] = {
     createStringConfig("proc-title-template", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.proc_title_template, CONFIG_DEFAULT_PROC_TITLE_TEMPLATE, isValidProcTitleTemplate, updateProcTitleTemplate),
     createStringConfig("bind-source-addr", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.bind_source_addr, NULL, NULL, NULL),
     createStringConfig("logfile", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.logfile, "", NULL, NULL),
-    createStringConfig("locale-collate", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.locale_collate, "", NULL, updateLocaleCollate),
 
     /* SDS Configs */
     createSDSConfig("masterauth", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.masterauth, NULL, NULL, NULL),
@@ -3116,7 +3066,6 @@ standardConfig static_configs[] = {
     /* Long Long configs */
     createLongLongConfig("busy-reply-threshold", "lua-time-limit", MODIFIABLE_CONFIG, 0, LONG_MAX, server.busy_reply_threshold, 5000, INTEGER_CONFIG, NULL, NULL),/* milliseconds */
     createLongLongConfig("cluster-node-timeout", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.cluster_node_timeout, 15000, INTEGER_CONFIG, NULL, NULL),
-    createLongLongConfig("cluster-ping-interval", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, LLONG_MAX, server.cluster_ping_interval, 0, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("slowlog-log-slower-than", NULL, MODIFIABLE_CONFIG, -1, LLONG_MAX, server.slowlog_log_slower_than, 10000, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("latency-monitor-threshold", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.latency_monitor_threshold, 0, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("proto-max-bulk-len", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, 1024*1024, LONG_MAX, server.proto_max_bulk_len, 512ll*1024*1024, MEMORY_CONFIG, NULL, NULL), /* Bulk request max size */
@@ -3145,6 +3094,7 @@ standardConfig static_configs[] = {
     createOffTConfig("auto-aof-rewrite-min-size", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.aof_rewrite_min_size, 64*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createOffTConfig("loading-process-events-interval-bytes", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1024, INT_MAX, server.loading_process_events_interval_bytes, 1024*1024*2, INTEGER_CONFIG, NULL, NULL),
 
+#ifdef USE_OPENSSL
     createIntConfig("tls-port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.tls_port, 0, INTEGER_CONFIG, NULL, applyTLSPort), /* TCP port. */
     createIntConfig("tls-session-cache-size", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.tls_ctx_config.session_cache_size, 20*1024, INTEGER_CONFIG, NULL, applyTlsCfg),
     createIntConfig("tls-session-cache-timeout", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.tls_ctx_config.session_cache_timeout, 300, INTEGER_CONFIG, NULL, applyTlsCfg),
@@ -3165,6 +3115,7 @@ standardConfig static_configs[] = {
     createStringConfig("tls-protocols", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.protocols, NULL, NULL, applyTlsCfg),
     createStringConfig("tls-ciphers", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.ciphers, NULL, NULL, applyTlsCfg),
     createStringConfig("tls-ciphersuites", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.ciphersuites, NULL, NULL, applyTlsCfg),
+#endif
 
     /* Special configs */
     createSpecialConfig("dir", NULL, MODIFIABLE_CONFIG | PROTECTED_CONFIG | DENY_LOADING_CONFIG, setConfigDirOption, getConfigDirOption, rewriteConfigDirOption, NULL),

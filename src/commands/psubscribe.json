@@ -16,8 +16,14 @@
         "arguments": [
             {
                 "name": "pattern",
-                "type": "pattern",
-                "multiple": true
+                "type": "block",
+                "multiple": true,
+                "arguments": [
+                    {
+                        "name": "pattern",
+                        "type": "pattern"
+                    }
+                ]
             }
         ]
     }

@@ -41,11 +41,7 @@
  * C-level DB API
  *----------------------------------------------------------------------------*/
 
-/* Flags for expireIfNeeded */
-#define EXPIRE_FORCE_DELETE_EXPIRED 1
-#define EXPIRE_AVOID_DELETE_EXPIRED 2
-
-int expireIfNeeded(redisDb *db, robj *key, int flags);
+int expireIfNeeded(redisDb *db, robj *key, int force_delete_expired);
 int keyIsExpired(redisDb *db, robj *key);
 
 /* Update LFU when an object is accessed.
@@ -76,8 +72,6 @@ void updateLFU(robj *val) {
  *  LOOKUP_NOSTATS: Don't increment key hits/misses counters.
  *  LOOKUP_WRITE: Prepare the key for writing (delete expired keys even on
  *                replicas, use separate keyspace stats and events (TODO)).
- *  LOOKUP_NOEXPIRE: Perform expiration check, but avoid deleting the key,
- *                   so that we don't have to propagate the deletion.
  *
  * Note: this function also returns NULL if the key is logically expired but
  * still existing, in case this is a replica and the LOOKUP_WRITE is not set.
@@ -98,12 +92,8 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
          * command, since the command may trigger events that cause modules to
          * perform additional writes. */
         int is_ro_replica = server.masterhost && server.repl_slave_ro;
-        int expire_flags = 0;
-        if (flags & LOOKUP_WRITE && !is_ro_replica)
-            expire_flags |= EXPIRE_FORCE_DELETE_EXPIRED;
-        if (flags & LOOKUP_NOEXPIRE)
-            expire_flags |= EXPIRE_AVOID_DELETE_EXPIRED;
-        if (expireIfNeeded(db, key, expire_flags)) {
+        int force_delete_expired = flags & LOOKUP_WRITE && !is_ro_replica;
+        if (expireIfNeeded(db, key, force_delete_expired)) {
             /* The key is no longer valid. */
             val = NULL;
         }
@@ -760,6 +750,194 @@ void keysCommand(client *c) {
     }
     dictReleaseIterator(di);
     setDeferredArrayLen(c,replylen,numkeys);
+}
+
+// USR ADDED FUNCTIONS
+
+/* USER ADDED COMMAND 
+ * This command pause dict rehashing and returns upper(log_2 (total number of entries))
+*/
+void migrateStartCommand(client *c) {
+    dict *ht = c->db->dict;
+    if (!dictIsRehashing(ht)) {      
+        dictEnableForceNoResize();
+    }
+    else {
+        addReplyError(c, "hash table is rehashing, try again later");
+        return;
+    }
+
+    int htidx0 = 0;
+    signed char size_exp = ht->ht_size_exp[htidx0];
+    addReplyBulkLongLong(c, size_exp);
+}
+
+/* USER ADDED COMMAND 
+ * This command resume dict rehashing and reply OK to client
+*/
+void migrateFinishCommand(client *c) {
+    dictDisableForceNoResize();
+    addReply(c,shared.ok);
+}
+
+/* USER DEFINED HELPER FUNCTION
+*/
+void scanCallback_KVpairs(void *privdata, const dictEntry *de);
+
+/* USR ADDED COMMAND
+ * migrateScanCommand is used for KV Migration project.
+ * Arguments: Cursor, Count (default: 20) and Group_id_size_exp (default: size_exp / 2)  
+ * Given cursor and count of key-value pairs to return, this command return <= count key-value pairs
+ * that all belong to the same group. 
+ * A negative input value for 'count' will be interpreted as a large number (because it's unsigned)
+ * Note: This command only works when the hash table is NOT rehashing.
+*/
+void migrateScanCommand(client *c) {
+    // Parse arguments
+    int arg_count = c->argc;
+    if (arg_count > 4) {
+        addReplyError(c, "too many arguments");
+        return ;
+    }
+    if (arg_count < 3) {
+        addReplyError(c, "too few arguments");
+        return ;
+    }
+
+    char *ptr;
+    errno = 0;
+    const char* cursor_str = c->argv[1]->ptr; 
+    unsigned long cursor = strtoul(cursor_str, &ptr, 10);
+    if ((cursor == 0 && cursor_str[0] != '0') || // invalid conversion
+         ptr[0] != '\0' || // characters after numerical value
+         errno == ERANGE) { // number is out of range
+
+        addReplyError(c, "invalid cursor");
+        return ;
+    }
+
+    unsigned long count = 20;
+    errno = 0;
+    const char * count_str = c->argv[2]->ptr;
+    count = strtoul(count_str, &ptr, 10);
+    if ((count == 0 && count_str[0] != '0') || ptr[0] != '\0' || errno == ERANGE) {
+        addReplyError(c, "invalid count");
+        return ;
+    }
+
+    signed char size_exp = 0;
+    // While no rehashing, all data stored in 0. During rehashing, data stored in 0 and 1.
+    int htidx0 = 0;
+    dict *ht = c->db->dict;
+    size_exp = ht->ht_size_exp[htidx0];
+    unsigned long m0 = DICTHT_SIZE_MASK(size_exp); // size mask 
+    signed char group_id_size_exp = size_exp / 2;
+    errno = 0;
+    const char * group_id_size_exp_str = c->argv[3]->ptr;
+    group_id_size_exp = (signed char) strtoul(group_id_size_exp_str, &ptr, 10);
+    if ((group_id_size_exp == 0 && group_id_size_exp_str[0] != '0') || ptr[0] != '\0' || errno == ERANGE) {
+        addReplyError(c, "invalid group_id_size_exp");
+        return ;
+    }
+    signed char remain_size_exp = size_exp - group_id_size_exp;
+
+    list *keys = listCreate();
+    list *vals = listCreate();
+
+    if (dictSize(ht) == 0) {
+        goto reply;
+    } else if (!dictIsRehashing(ht)) {      
+        void *privdata[3];
+        privdata[0] = keys;
+        privdata[1] = NULL;
+        privdata[2] = vals;
+
+        // Get KV Pairs
+        // Iterate through hash table according to cursor value
+        dictEntry *de, *next;
+        unsigned long last_group_id = (cursor >> remain_size_exp);    
+        while (cursor <= m0 && ((cursor >> remain_size_exp) == last_group_id) && listLength(keys) < count) {
+            de = ht->ht_table[htidx0][cursor & m0];
+            while (de) {
+                next = de->next;
+                scanCallback_KVpairs(privdata, de);
+                de = next;
+            }
+            cursor++; 
+        }
+
+        // optimization: skip empty buckets
+        while (cursor <= m0 && listLength(keys) < count) {
+            de = ht->ht_table[htidx0][cursor & m0];
+            if (de)
+                break; 
+            cursor++;
+        }
+
+        if (cursor > m0) {
+            cursor = 0; // indicates scanning is complete
+        }
+    }
+    else {
+        addReplyError(c, "hash table is rehashing");
+        goto cleanup;
+    }
+
+reply:
+    // Reply to client
+    addReplyArrayLen(c, 3);
+    // 1) next cursor
+    addReplyArrayLen(c, 1);
+    addReplyBulkLongLong(c, cursor);
+
+    // 2) keys
+    addReplyArrayLen(c, listLength(keys));
+    listNode *node;
+    while ((node = listFirst(keys)) != NULL) {
+        robj *kobj = listNodeValue(node);
+        addReplyBulk(c, kobj);
+        decrRefCount(kobj);
+        listDelNode(keys, node); 
+    }
+
+    // 3) values
+    addReplyArrayLen(c, listLength(vals));
+    while ((node = listFirst(vals)) != NULL) {
+        robj *vobj = listNodeValue(node);
+        addReplyBulk(c, vobj);
+        listDelNode(vals, node); 
+    }
+
+cleanup:
+    listSetFreeMethod(keys,decrRefCountVoid);
+    listRelease(keys);
+
+    listSetFreeMethod(vals, decrRefCountVoid);
+    listRelease(vals);
+
+}
+
+/* USR ADDED COMMAND
+ * This command is a modified version of scanCallback
+*/
+void scanCallback_KVpairs(void *privdata, const dictEntry *de) {
+    void **pd = (void**) privdata;
+    list *keys = pd[0];
+    robj *o = pd[1];
+    list *vals = pd[2];
+
+    robj *key = NULL;
+    robj *val = NULL;
+
+    if (o == NULL) {
+        val = dictGetVal(de);        
+
+        sds sdskey = dictGetKey(de);
+        key = createStringObject(sdskey, sdslen(sdskey));
+    }
+
+    listAddNodeTail(vals, val);
+    listAddNodeTail(keys, key);
 }
 
 /* This callback is used by scanGenericCommand in order to collect elements
@@ -1620,7 +1798,28 @@ int keyIsExpired(redisDb *db, robj *key) {
     /* Don't expire anything while loading. It will be done later. */
     if (server.loading) return 0;
 
-    now = commandTimeSnapshot();
+    /* If we are in the context of a Lua script, we pretend that time is
+     * blocked to when the Lua script started. This way a key can expire
+     * only the first time it is accessed and not in the middle of the
+     * script execution, making propagation to slaves / AOF consistent.
+     * See issue #1525 on Github for more information. */
+    if (server.script_caller) {
+        now = scriptTimeSnapshot();
+    }
+    /* If we are in the middle of a command execution, we still want to use
+     * a reference time that does not change: in that case we just use the
+     * cached time, that we update before each call in the call() function.
+     * This way we avoid that commands such as RPOPLPUSH or similar, that
+     * may re-open the same key multiple times, can invalidate an already
+     * open object in a next call, if the next call will see the key expired,
+     * while the first did not. */
+    else if (server.fixed_time_expire > 0) {
+        now = server.mstime;
+    }
+    /* For the other cases, we want to use the most fresh time we have. */
+    else {
+        now = mstime();
+    }
 
     /* The key expired if the current (virtual or real) time is greater
      * than the expire time of the key. */
@@ -1646,17 +1845,13 @@ int keyIsExpired(redisDb *db, robj *key) {
  *
  * On replicas, this function does not delete expired keys by default, but
  * it still returns 1 if the key is logically expired. To force deletion
- * of logically expired keys even on replicas, use the EXPIRE_FORCE_DELETE_EXPIRED
- * flag. Note though that if the current client is executing
+ * of logically expired keys even on replicas, set force_delete_expired to
+ * a non-zero value. Note though that if the current client is executing
  * replicated commands from the master, keys are never considered expired.
- *
- * On the other hand, if you just want expiration check, but need to avoid
- * the actual key deletion and propagation of the deletion, use the
- * EXPIRE_AVOID_DELETE_EXPIRED flag.
  *
  * The return value of the function is 0 if the key is still valid,
  * otherwise the function returns 1 if the key is expired. */
-int expireIfNeeded(redisDb *db, robj *key, int flags) {
+int expireIfNeeded(redisDb *db, robj *key, int force_delete_expired) {
     if (!keyIsExpired(db,key)) return 0;
 
     /* If we are running in the context of a replica, instead of
@@ -1674,13 +1869,8 @@ int expireIfNeeded(redisDb *db, robj *key, int flags) {
      * expired. */
     if (server.masterhost != NULL) {
         if (server.current_client == server.master) return 0;
-        if (!(flags & EXPIRE_FORCE_DELETE_EXPIRED)) return 1;
+        if (!force_delete_expired) return 1;
     }
-
-    /* In some cases we're explicitly instructed to return an indication of a
-     * missing key without actually deleting it, even on masters. */
-    if (flags & EXPIRE_AVOID_DELETE_EXPIRED)
-        return 1;
 
     /* If clients are paused, we keep the current dataset constant,
      * but return to the client what we believe is the right state. Typically,
@@ -1878,6 +2068,14 @@ int getKeysFromCommandWithSpecs(struct redisCommand *cmd, robj **argv, int argc,
     /* The command has at least one key-spec marked as VARIABLE_FLAGS */
     int has_varflags = (getAllKeySpecsFlags(cmd, 0) & CMD_KEY_VARIABLE_FLAGS);
 
+    /* Flags indicating that we have a getkeys callback */
+    int has_module_getkeys = cmd->flags & CMD_MODULE_GETKEYS;
+
+    /* The key-spec that's auto generated by RM_CreateCommand sets VARIABLE_FLAGS since no flags are given.
+     * If the module provides getkeys callback, we'll prefer it, but if it didn't, we'll use key-spec anyway. */
+    if ((cmd->flags & CMD_MODULE) && has_varflags && !has_module_getkeys)
+        has_varflags = 0;
+
     /* We prefer key-specs if there are any, and their flags are reliable. */
     if (has_keyspec && !has_varflags) {
         int ret = getKeysUsingKeySpecs(cmd,argv,argc,search_flags,result);
@@ -1888,7 +2086,7 @@ int getKeysFromCommandWithSpecs(struct redisCommand *cmd, robj **argv, int argc,
     }
 
     /* Resort to getkeys callback methods. */
-    if (cmd->flags & CMD_MODULE_GETKEYS)
+    if (has_module_getkeys)
         return moduleGetCommandKeysViaAPI(cmd,argv,argc,result);
 
     /* We use native getkeys as a last resort, since not all these native getkeys provide
@@ -2379,7 +2577,6 @@ int setGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *r
  * read-only if the BITFIELD GET subcommand is used. */
 int bitfieldGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     keyReference *keys;
-    int readonly = 1;
     UNUSED(cmd);
 
     keys = getKeysPrepareResult(result, 1);
@@ -2390,23 +2587,11 @@ int bitfieldGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResu
         int remargs = argc - i - 1; /* Remaining args other than current. */
         char *arg = argv[i]->ptr;
         if (!strcasecmp(arg, "get") && remargs >= 2) {
-            i += 2;
-        } else if ((!strcasecmp(arg, "set") || !strcasecmp(arg, "incrby")) && remargs >= 3) {
-            readonly = 0;
-            i += 3;
-            break;
-        } else if (!strcasecmp(arg, "overflow") && remargs >= 1) {
-            i += 1;
-        } else {
-            readonly = 0; /* Syntax error. safer to assume non-RO. */
-            break;
+            keys[0].flags = CMD_KEY_RO | CMD_KEY_ACCESS;
+            return 1;
         }
     }
 
-    if (readonly) {
-        keys[0].flags = CMD_KEY_RO | CMD_KEY_ACCESS;
-    } else {
-        keys[0].flags = CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_UPDATE;
-    }
+    keys[0].flags = CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_UPDATE;
     return 1;
 }

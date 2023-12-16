@@ -14,7 +14,7 @@
         ],
         "arguments": [
             {
-                "name": "data",
+                "name": "parameter_value",
                 "type": "block",
                 "multiple": true,
                 "arguments": [

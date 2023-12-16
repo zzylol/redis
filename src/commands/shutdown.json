@@ -23,7 +23,7 @@
         ],
         "arguments": [
             {
-                "name": "save-selector",
+                "name": "nosave_save",
                 "type": "oneof",
                 "optional": true,
                 "arguments": [

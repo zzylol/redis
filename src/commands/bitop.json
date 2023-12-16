@@ -54,29 +54,7 @@
         "arguments": [
             {
                 "name": "operation",
-                "type": "oneof",
-                "arguments": [
-                    {
-                        "name": "and",
-                        "type": "pure-token",
-                        "token": "AND"
-                    },
-                    {
-                        "name": "or",
-                        "type": "pure-token",
-                        "token": "OR"
-                    },
-                    {
-                        "name": "xor",
-                        "type": "pure-token",
-                        "token": "XOR"
-                    },
-                    {
-                        "name": "not",
-                        "type": "pure-token",
-                        "token": "NOT"
-                    }
-                ]
+                "type": "string"
             },
             {
                 "name": "destkey",

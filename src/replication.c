@@ -33,7 +33,6 @@
 #include "cluster.h"
 #include "bio.h"
 #include "functions.h"
-#include "connection.h"
 
 #include <memory.h>
 #include <sys/time.h>
@@ -45,7 +44,7 @@
 void replicationDiscardCachedMaster(void);
 void replicationResurrectCachedMaster(connection *conn);
 void replicationSendAck(void);
-int replicaPutOnline(client *slave);
+void replicaPutOnline(client *slave);
 void replicaStartCommandStream(client *slave);
 int cancelReplicationHandshake(int reconnect);
 
@@ -55,13 +54,6 @@ int cancelReplicationHandshake(int reconnect);
 int RDBGeneratedByReplication = 0;
 
 /* --------------------------- Utility functions ---------------------------- */
-static ConnectionType *connTypeOfReplication() {
-    if (server.tls_replication) {
-        return connectionTypeTls();
-    }
-
-    return connectionTypeTcp();
-}
 
 /* Return the pointer to a string representing the slave ip:listening_port
  * pair. Mostly useful for logging, since we want to log a slave using its
@@ -74,11 +66,11 @@ char *replicationGetSlaveName(client *c) {
     ip[0] = '\0';
     buf[0] = '\0';
     if (c->slave_addr ||
-        connAddrPeerName(c->conn,ip,sizeof(ip),NULL) != -1)
+        connPeerToString(c->conn,ip,sizeof(ip),NULL) != -1)
     {
         char *addr = c->slave_addr ? c->slave_addr : ip;
         if (c->slave_listening_port)
-            formatAddr(buf,sizeof(buf),addr,c->slave_listening_port);
+            anetFormatAddr(buf,sizeof(buf),addr,c->slave_listening_port);
         else
             snprintf(buf,sizeof(buf),"%s:<unknown-replica-port>",addr);
     } else {
@@ -111,7 +103,7 @@ int bg_unlink(const char *filename) {
             errno = old_errno;
             return -1;
         }
-        bioCreateCloseJob(fd, 0);
+        bioCreateCloseJob(fd);
         return 0; /* Success. */
     }
 }
@@ -428,7 +420,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     char llstr[LONG_STR_SIZE];
 
     /* In case we propagate a command that doesn't touch keys (PING, REPLCONF) we
-     * pass dbid=-1 that indicate there is no need to replicate `select` command. */
+     * pass dbid=server.slaveseldb which may be -1. */
     serverAssert(dictid == -1 || (dictid >= 0 && dictid < server.dbnum));
 
     /* If the instance is not a top level master, return ASAP: we'll just proxy
@@ -450,7 +442,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     prepareReplicasToWrite();
 
     /* Send SELECT command to every slave if needed. */
-    if (dictid != -1 && server.slaveseldb != dictid) {
+    if (server.slaveseldb != dictid) {
         robj *selectcmd;
 
         /* For a few DBs we have pre-computed SELECT command. */
@@ -1260,19 +1252,12 @@ void replconfCommand(client *c) {
  * It does a few things:
  * 1) Put the slave in ONLINE state.
  * 2) Update the count of "good replicas".
- * 3) Trigger the module event.
- *
- * the return value indicates that the replica should be disconnected.
- * */
-int replicaPutOnline(client *slave) {
+ * 3) Trigger the module event. */
+void replicaPutOnline(client *slave) {
     if (slave->flags & CLIENT_REPL_RDBONLY) {
-        slave->replstate = SLAVE_STATE_RDB_TRANSMITTED;
-        /* The client asked for RDB only so we should close it ASAP */
-        serverLog(LL_NOTICE,
-                  "RDB transfer completed, rdb only replica (%s) should be disconnected asap",
-                  replicationGetSlaveName(slave));
-        return 0;
+        return;
     }
+
     slave->replstate = SLAVE_STATE_ONLINE;
     slave->repl_ack_time = server.unixtime; /* Prevent false timeout. */
 
@@ -1283,7 +1268,6 @@ int replicaPutOnline(client *slave) {
                           NULL);
     serverLog(LL_NOTICE,"Synchronization with replica %s succeeded",
         replicationGetSlaveName(slave));
-    return 1;
 }
 
 /* This function should be called just after a replica received the RDB file
@@ -1298,8 +1282,14 @@ int replicaPutOnline(client *slave) {
  *    accumulate output buffer data without sending it to the replica so it
  *    won't get mixed with the RDB stream. */
 void replicaStartCommandStream(client *slave) {
-    serverAssert(!(slave->flags & CLIENT_REPL_RDBONLY));
     slave->repl_start_cmd_stream_on_ack = 0;
+    if (slave->flags & CLIENT_REPL_RDBONLY) {
+        serverLog(LL_NOTICE,
+            "Close the connection with replica %s as RDB transfer is complete",
+            replicationGetSlaveName(slave));
+        freeClientAsync(slave);
+        return;
+    }
 
     putClientInPendingWriteQueue(slave);
 }
@@ -1402,10 +1392,7 @@ void sendBulkToSlave(connection *conn) {
         close(slave->repldbfd);
         slave->repldbfd = -1;
         connSetWriteHandler(slave->conn,NULL);
-        if (!replicaPutOnline(slave)) {
-            freeClient(slave);
-            return;
-        }
+        replicaPutOnline(slave);
         replicaStartCommandStream(slave);
     }
 }
@@ -1581,7 +1568,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
              * the slave online. */
             if (type == RDB_CHILD_TYPE_SOCKET) {
                 serverLog(LL_NOTICE,
-                    "Streamed RDB transfer with replica %s succeeded (socket). Waiting for REPLCONF ACK from replica to enable streaming",
+                    "Streamed RDB transfer with replica %s succeeded (socket). Waiting for REPLCONF ACK from slave to enable streaming",
                         replicationGetSlaveName(slave));
                 /* Note: we wait for a REPLCONF ACK message from the replica in
                  * order to really put it online (install the write handler
@@ -1608,10 +1595,7 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                  * after such final EOF. So we don't want to glue the end of
                  * the RDB transfer with the start of the other replication
                  * data. */
-                if (!replicaPutOnline(slave)) {
-                    freeClientAsync(slave);
-                    continue;
-                }
+                replicaPutOnline(slave);
                 slave->repl_start_cmd_stream_on_ack = 1;
             } else {
                 if ((slave->repldbfd = open(server.rdb_filename,O_RDONLY)) == -1 ||
@@ -2071,7 +2055,7 @@ void readSyncBulkPayload(connection *conn) {
             /* RDB loading failed. */
             serverLog(LL_WARNING,
                       "Failed trying to load the MASTER synchronization DB "
-                      "from socket, check server logs.");
+                      "from socket: %s", strerror(errno));
             loadingFailed = 1;
         } else if (usemark) {
             /* Verify the end mark is correct. */
@@ -2165,22 +2149,12 @@ void readSyncBulkPayload(connection *conn) {
             return;
         }
         /* Close old rdb asynchronously. */
-        if (old_rdb_fd != -1) bioCreateCloseJob(old_rdb_fd, 0);
+        if (old_rdb_fd != -1) bioCreateCloseJob(old_rdb_fd);
 
-        /* Sync the directory to ensure rename is persisted */
-        if (fsyncFileDir(server.rdb_filename) == -1) {
-            serverLog(LL_WARNING,
-                "Failed trying to sync DB directory %s in "
-                "MASTER <-> REPLICA synchronization: %s",
-                server.rdb_filename, strerror(errno));
-            cancelReplicationHandshake(1);
-            return;
-        }
-
-        if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_REPLICATION) != RDB_OK) {
+        if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_REPLICATION) != C_OK) {
             serverLog(LL_WARNING,
                 "Failed trying to load the MASTER synchronization "
-                "DB from disk, check server logs.");
+                "DB from disk: %s", strerror(errno));
             cancelReplicationHandshake(1);
             if (server.rdb_del_sync_files && allPersistenceDisabled()) {
                 serverLog(LL_NOTICE,"Removing the RDB file obtained from "
@@ -2879,7 +2853,7 @@ write_error: /* Handle sendCommand() errors. */
 }
 
 int connectWithMaster(void) {
-    server.repl_transfer_s = connCreate(connTypeOfReplication());
+    server.repl_transfer_s = server.tls_replication ? connCreateTLS() : connCreateSocket();
     if (connConnect(server.repl_transfer_s, server.masterhost, server.masterport,
                 server.bind_source_addr, syncWithMaster) == C_ERR) {
         serverLog(LL_WARNING,"Unable to connect to MASTER: %s",
@@ -3172,7 +3146,7 @@ void roleCommand(client *c) {
             char ip[NET_IP_STR_LEN], *slaveaddr = slave->slave_addr;
 
             if (!slaveaddr) {
-                if (connAddrPeerName(slave->conn,ip,sizeof(ip),NULL) == -1)
+                if (connPeerToString(slave->conn,ip,sizeof(ip),NULL) == -1)
                     continue;
                 slaveaddr = ip;
             }
@@ -3336,7 +3310,7 @@ void replicationDiscardCachedMaster(void) {
  * passed as argument as the socket for the new master.
  *
  * This function is called when successfully setup a partial resynchronization
- * so the stream of data that we'll receive will start from where this
+ * so the stream of data that we'll receive will start from were this
  * master left. */
 void replicationResurrectCachedMaster(connection *conn) {
     server.master = server.cached_master;
@@ -3631,7 +3605,7 @@ void replicationCron(void) {
 
         if (!manual_failover_in_progress) {
             ping_argv[0] = shared.ping;
-            replicationFeedSlaves(server.slaves, -1,
+            replicationFeedSlaves(server.slaves, server.slaveseldb,
                 ping_argv, 1);
         }
     }
@@ -3833,7 +3807,7 @@ static client *findReplica(char *host, int port) {
         char ip[NET_IP_STR_LEN], *replicaip = replica->slave_addr;
 
         if (!replicaip) {
-            if (connAddrPeerName(replica->conn, ip, sizeof(ip), NULL) == -1)
+            if (connPeerToString(replica->conn, ip, sizeof(ip), NULL) == -1)
                 continue;
             replicaip = ip;
         }
@@ -4006,7 +3980,7 @@ void failoverCommand(client *c) {
         serverLog(LL_NOTICE,"FAILOVER requested to any replica.");
     }
 
-    mstime_t now = commandTimeSnapshot();
+    mstime_t now = mstime();
     if (timeout_in_ms) {
         server.failover_end_time = now + timeout_in_ms;
     }
@@ -4064,7 +4038,7 @@ void updateFailoverStatus(void) {
                 char ip[NET_IP_STR_LEN], *replicaaddr = replica->slave_addr;
 
                 if (!replicaaddr) {
-                    if (connAddrPeerName(replica->conn,ip,sizeof(ip),NULL) == -1)
+                    if (connPeerToString(replica->conn,ip,sizeof(ip),NULL) == -1)
                         continue;
                     replicaaddr = ip;
                 }

@@ -11,8 +11,7 @@
             "ADMIN",
             "NOSCRIPT",
             "LOADING",
-            "STALE",
-            "SENTINEL"
+            "STALE"
         ],
         "acl_categories": [
             "CONNECTION"

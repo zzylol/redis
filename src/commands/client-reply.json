@@ -10,15 +10,14 @@
         "command_flags": [
             "NOSCRIPT",
             "LOADING",
-            "STALE",
-            "SENTINEL"
+            "STALE"
         ],
         "acl_categories": [
             "CONNECTION"
         ],
         "arguments": [
             {
-                "name": "action",
+                "name": "on_off_skip",
                 "type": "oneof",
                 "arguments": [
                     {

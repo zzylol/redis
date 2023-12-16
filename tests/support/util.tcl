@@ -72,8 +72,14 @@ proc sanitizer_errors_from_file {filename} {
 }
 
 proc getInfoProperty {infostr property} {
-    if {[regexp -lineanchor "^$property:(.*?)\r\n" $infostr _ value]} {
-        return $value
+    if {[regexp "\r\n$property:(.*?)\r\n" $infostr _ value]} {
+        set _ $value
+    }
+}
+
+proc cluster_info {r field} {
+    if {[regexp "^$field:(.*?)\r\n" [$r cluster info] _ value]} {
+        set _ $value
     }
 }
 
@@ -158,7 +164,7 @@ proc count_log_lines {srv_idx} {
 # returns the number of times a line with that pattern appears in a file
 proc count_message_lines {file pattern} {
     set res 0
-    # exec fails when grep exists with status other than 0 (when the pattern wasn't found)
+    # exec fails when grep exists with status other than 0 (when the patter wasn't found)
     catch {
         set res [string trim [exec grep $pattern $file 2> /dev/null | wc -l]]
     }
@@ -928,12 +934,6 @@ proc config_set {param value {options {}}} {
     }
 }
 
-proc config_get_set {param value {options {}}} {
-    set config [lindex [r config get $param] 1]
-    config_set $param $value $options
-    return $config
-}
-
 proc delete_lines_with_pattern {filename tmpfilename pattern} {
     set fh_in [open $filename r]
     set fh_out [open $tmpfilename w]
@@ -1044,26 +1044,4 @@ proc memory_usage {key} {
         set usage 1
     }
     return $usage
-}
-
-# forward compatibility, lmap missing in TCL 8.5
-proc lmap args {
-    set body [lindex $args end]
-    set args [lrange $args 0 end-1]
-    set n 0
-    set pairs [list]
-    foreach {varnames listval} $args {
-        set varlist [list]
-        foreach varname $varnames {
-            upvar 1 $varname var$n
-            lappend varlist var$n
-            incr n
-        }
-        lappend pairs $varlist $listval
-    }
-    set temp [list]
-    foreach {*}$pairs {
-        lappend temp [uplevel 1 $body]
-    }
-    set temp
 }

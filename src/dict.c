@@ -46,6 +46,7 @@
 #include "dict.h"
 #include "zmalloc.h"
 #include "redisassert.h"
+#include "crc64.h"
 
 /* Using dictEnableResize() / dictDisableResize() we make possible to
  * enable/disable resizing of the hash table as needed. This is very important
@@ -56,6 +57,7 @@
  * prevented: a hash table is still allowed to grow if the ratio between
  * the number of elements and the buckets > dict_force_resize_ratio. */
 static int dict_can_resize = 1;
+static int dict_force_no_resize = 0;
 static unsigned int dict_force_resize_ratio = 5;
 
 /* -------------------------- private prototypes ---------------------------- */
@@ -84,7 +86,8 @@ uint64_t siphash(const uint8_t *in, const size_t inlen, const uint8_t *k);
 uint64_t siphash_nocase(const uint8_t *in, const size_t inlen, const uint8_t *k);
 
 uint64_t dictGenHashFunction(const void *key, size_t len) {
-    return siphash(key,len,dict_hash_function_seed);
+    return crc64(0, key, (uint64_t) len);
+    // return siphash(key,len,dict_hash_function_seed);
 }
 
 uint64_t dictGenCaseHashFunction(const unsigned char *buf, size_t len) {
@@ -127,7 +130,7 @@ int dictResize(dict *d)
 {
     unsigned long minimal;
 
-    if (!dict_can_resize || dictIsRehashing(d)) return DICT_ERR;
+    if (!dict_force_no_resize && (!dict_can_resize || dictIsRehashing(d))) return DICT_ERR;
     minimal = d->ht_used[0];
     if (minimal < DICT_HT_INITIAL_SIZE)
         minimal = DICT_HT_INITIAL_SIZE;
@@ -282,7 +285,7 @@ int dictRehashMilliseconds(dict *d, int ms) {
 /* This function performs just a step of rehashing, and only if hashing has
  * not been paused for our hash table. When we have iterators in the
  * middle of a rehashing we can't mess with the two hash tables otherwise
- * some elements can be missed or duplicated.
+ * some element can be missed or duplicated.
  *
  * This function is called by common lookup or update operations in the
  * dictionary so that the hash table automatically migrates from H1 to H2
@@ -572,36 +575,16 @@ unsigned long long dictFingerprint(dict *d) {
     return hash;
 }
 
-void dictInitIterator(dictIterator *iter, dict *d)
+dictIterator *dictGetIterator(dict *d)
 {
+    dictIterator *iter = zmalloc(sizeof(*iter));
+
     iter->d = d;
     iter->table = 0;
     iter->index = -1;
     iter->safe = 0;
     iter->entry = NULL;
     iter->nextEntry = NULL;
-}
-
-void dictInitSafeIterator(dictIterator *iter, dict *d)
-{
-    dictInitIterator(iter, d);
-    iter->safe = 1;
-}
-
-void dictResetIterator(dictIterator *iter)
-{
-    if (!(iter->index == -1 && iter->table == 0)) {
-        if (iter->safe)
-            dictResumeRehashing(iter->d);
-        else
-            assert(iter->fingerprint == dictFingerprint(iter->d));
-    }
-}
-
-dictIterator *dictGetIterator(dict *d)
-{
-    dictIterator *iter = zmalloc(sizeof(*iter));
-    dictInitIterator(iter, d);
     return iter;
 }
 
@@ -647,7 +630,12 @@ dictEntry *dictNext(dictIterator *iter)
 
 void dictReleaseIterator(dictIterator *iter)
 {
-    dictResetIterator(iter);
+    if (!(iter->index == -1 && iter->table == 0)) {
+        if (iter->safe)
+            dictResumeRehashing(iter->d);
+        else
+            assert(iter->fingerprint == dictFingerprint(iter->d));
+    }
     zfree(iter);
 }
 
@@ -1015,7 +1003,8 @@ static int _dictExpandIfNeeded(dict *d)
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
-    if (d->ht_used[0] >= DICTHT_SIZE(d->ht_size_exp[0]) &&
+    if (d->ht_used[0] >= DICTHT_SIZE(d->ht_size_exp[0]) && 
+        !dict_force_no_resize && 
         (dict_can_resize ||
          d->ht_used[0]/ DICTHT_SIZE(d->ht_size_exp[0]) > dict_force_resize_ratio) &&
         dictTypeExpandAllowed(d))
@@ -1076,6 +1065,14 @@ void dictEmpty(dict *d, void(callback)(dict*)) {
     _dictClear(d,1,callback);
     d->rehashidx = -1;
     d->pauserehash = 0;
+}
+
+void dictEnableForceNoResize(void) {
+    dict_force_no_resize = 1;
+}
+
+void dictDisableForceNoResize(void) {
+    dict_force_no_resize = 0;
 }
 
 void dictEnableResize(void) {
@@ -1225,7 +1222,7 @@ char *stringFromLongLong(long long value) {
     int len;
     char *s;
 
-    len = snprintf(buf,sizeof(buf),"%lld",value);
+    len = sprintf(buf,"%lld",value);
     s = zmalloc(len+1);
     memcpy(s, buf, len);
     s[len] = '\0';

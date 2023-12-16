@@ -49,7 +49,7 @@
                 "type": "integer"
             },
             {
-                "name": "range",
+                "name": "index",
                 "type": "block",
                 "optional": true,
                 "arguments": [
@@ -58,7 +58,7 @@
                         "type": "integer"
                     },
                     {
-                        "name": "end-unit-block",
+                        "name": "end_index",
                         "type": "block",
                         "optional": true,
                         "arguments": [
@@ -67,7 +67,7 @@
                                 "type": "integer"
                             },
                             {
-                                "name": "unit",
+                                "name": "index_unit",
                                 "type": "oneof",
                                 "optional": true,
                                 "since": "7.0.0",

@@ -22,8 +22,14 @@
         "arguments": [
             {
                 "name": "parameter",
-                "type": "string",
-                "multiple": true
+                "type": "block",
+                "multiple": true,
+                "arguments": [
+                    {
+                        "name": "parameter",
+                        "type": "string"
+                    }
+                ]
             }
         ]
     }

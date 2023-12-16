@@ -15,8 +15,7 @@
         ],
         "command_flags": [
             "LOADING",
-            "STALE",
-            "SENTINEL"
+            "STALE"
         ],
         "acl_categories": [
             "CONNECTION"
