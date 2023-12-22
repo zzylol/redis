@@ -16,6 +16,3 @@ cancelability
 ist
 statics
 filetest
-ro
-exat
-clen
