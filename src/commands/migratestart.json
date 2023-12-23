@@ -1,0 +1,15 @@
+{
+    "MIGRATESTART": {
+        "summary": "Indicate KV migration start.",
+        "group": "generic",
+        "arity": 1,
+        "function": "migrateStartCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "KEYSPACE"
+        ],
+        "arguments": []
+    }
+}

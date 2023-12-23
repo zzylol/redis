@@ -1,0 +1,29 @@
+{
+    "MIGRATESCAN": {
+        "summary": "Scan function for KV migration.",
+        "complexity": "O(1) for every call. O(N) for a complete iteration, including enough command calls for the cursor to return back to 0. N is the number of elements inside the collection.",
+        "group": "generic",
+        "arity": 4,
+        "function": "migrateScanCommand",
+        "command_flags": [
+            "READONLY"
+        ],
+        "acl_categories": [
+            "KEYSPACE"
+        ],
+        "arguments": [
+            {
+                "name": "cursor",
+                "type": "integer"
+            },
+            {
+                "name": "count",
+                "type": "integer"
+            },
+            {
+                "name": "group_id_size_exp",
+                "type": "integer"
+            }
+        ]
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "MIGRATEFINISH": {
+        "summary": "Indicate KV migration finish.",
+        "group": "generic",
+        "arity": 1,
+        "function": "migrateFinishCommand",
+        "command_flags": [
+            "WRITE"
+        ],
+        "acl_categories": [
+            "KEYSPACE",
+            "DANGEROUS"
+        ],
+        "arguments": []
+    }
+}
